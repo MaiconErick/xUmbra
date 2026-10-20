@@ -1,0 +1,239 @@
+package com.maiconerick.xumbra.data
+
+import org.json.JSONObject
+
+data class ModelRef(val provider: String, val model: String) {
+    val label get() = model.substringAfterLast('/')
+    fun json() = JSONObject().put("provider", provider).put("model", model)
+    companion object {
+        fun of(o: JSONObject?): ModelRef? {
+            o ?: return null
+            val p = o.optString("provider"); val m = o.optString("model")
+            return if (p.isBlank() || m.isBlank()) null else ModelRef(p, m)
+        }
+    }
+}
+
+data class LastMsg(val role: String, val text: String, val media: Int, val ts: Double)
+
+data class SessionRow(
+    val id: String, val summary: String, val status: String, val created: Double, val ts: Double,
+    val count: Int, val unread: Int, val last: LastMsg?, val starred: Boolean, val hidden: Boolean,
+    val persona: String?, val group: String?, val tags: List<String>, val customIcon: String?,
+    val proactive: Boolean, val model: ModelRef?, val costUsd: Double, val turns: Int,
+    val busy: Boolean, val queued: Int, val tokensIn: Long = 0, val tokensOut: Long = 0,
+    val secret: Boolean = false, val vanish: Boolean = false,
+) {
+    val title get() = summary.ifBlank { "New chat" }
+    fun json(): JSONObject = JSONObject().put("id", id).put("summary", summary).put("status", status).put("created", created)
+        .put("ts", ts).put("count", count).put("unread", unread).put("starred", starred).put("hidden", hidden)
+        .put("persona", persona ?: JSONObject.NULL).put("group", group ?: JSONObject.NULL)
+        .put("tags", org.json.JSONArray(tags)).put("custom_icon", customIcon ?: JSONObject.NULL).put("proactive", proactive)
+        .put("model", model?.json() ?: JSONObject.NULL).put("cost_usd", costUsd).put("turns", turns)
+        .put("tokens_in", tokensIn).put("tokens_out", tokensOut)
+        .put("last", last?.let { JSONObject().put("role", it.role).put("text", it.text).put("media", it.media).put("ts", it.ts) } ?: JSONObject.NULL)
+
+    companion object {
+        fun of(o: JSONObject) = SessionRow(
+            id = o.optString("id"), summary = o.optString("summary"), status = o.optString("status"),
+            created = o.optDouble("created", 0.0), ts = o.optDouble("ts", 0.0), count = o.optInt("count"),
+            unread = o.optInt("unread"),
+            last = o.optJSONObject("last")?.let { LastMsg(it.optString("role"), it.optString("text"), it.optInt("media"), it.optDouble("ts", 0.0)) },
+            starred = o.optBoolean("starred"), hidden = o.optBoolean("hidden"), persona = o.str("persona"),
+            group = o.str("group"), tags = o.optJSONArray("tags").strings(), customIcon = o.str("custom_icon"),
+            proactive = o.optBoolean("proactive"), model = ModelRef.of(o.optJSONObject("model")),
+            costUsd = o.optDouble("cost_usd", 0.0), turns = o.optInt("turns"),
+            busy = o.optBoolean("busy"), queued = o.optInt("queued"),
+            tokensIn = o.optLong("tokens_in"), tokensOut = o.optLong("tokens_out"),
+            secret = o.optBoolean("secret"), vanish = o.optBoolean("vanish"),
+        )
+    }
+}
+
+data class ToolCall(val name: String, val args: String, val result: String?, val ms: Int?, val callId: String? = null,
+                    val raw: JSONObject? = null) {
+    fun arg(k: String): String = raw?.optString(k).orEmpty()
+    companion object {
+        fun of(o: JSONObject) = ToolCall(
+            o.optString("name"), argsText(o.opt("args")), o.str("result"),
+            if (o.has("ms")) o.optInt("ms") else null, o.str("call_id"), o.optJSONObject("args"),
+        )
+        fun argsText(a: Any?): String = when (a) {
+            null, JSONObject.NULL -> ""
+            is JSONObject -> if (a.length() == 1) a.opt(a.keys().next()).toString() else a.toString(2)
+            else -> a.toString()
+        }
+    }
+}
+
+data class MemNote(val title: String, val detail: String)
+
+data class TurnInfo(
+    val provider: String, val model: String, val durationSec: Double,
+    val inTok: Int, val outTok: Int, val cacheRead: Int, val cacheWrite: Int, val costUsd: Double,
+    val tools: List<ToolCall>, val memory: List<MemNote>, val cancelled: Boolean,
+    val breakdown: Map<String, Int>, val error: String?,
+    val contextTokens: Int = 0, val contextWindow: Int = 0, val directSearch: Boolean = false,
+    val imageCost: Double = 0.0, val imageModel: String? = null, val imageNote: String? = null,
+) {
+    companion object {
+        fun of(o: JSONObject?): TurnInfo? {
+            o ?: return null
+            val bd = o.optJSONObject("breakdown")
+            return TurnInfo(
+                o.optString("provider"), o.optString("model"), o.optDouble("duration_sec", 0.0),
+                o.optInt("input_tokens"), o.optInt("output_tokens"), o.optInt("cache_read_tokens"),
+                o.optInt("cache_write_tokens"), o.optDouble("cost_usd", 0.0),
+                o.optJSONArray("tools").objects().map(ToolCall::of),
+                o.optJSONArray("memory").objects().map { MemNote(it.optString("title"), it.optString("detail")) },
+                o.optBoolean("cancelled"),
+                bd?.keys()?.asSequence()?.associateWith { bd.optInt(it) } ?: emptyMap(),
+                o.str("error"), o.optInt("context_tokens"), o.optInt("context_window"), o.optBoolean("direct_search"),
+                o.optDouble("image_cost_usd", 0.0).let { if (it.isNaN()) 0.0 else it }, o.str("image_model"), o.str("image_note"),
+            )
+        }
+    }
+}
+
+/** One chat message. [pending]/[failed] are phone-only states for messages not yet stored on the Pi. */
+data class Msg(
+    val id: String, val role: String, val ts: Double, val text: String, val media: List<String>,
+    val ephemeral: Boolean, val clientId: String?, val turn: TurnInfo?, val source: String?,
+    val pending: Boolean = false, val failed: String? = null, val localImages: List<String> = emptyList(),
+    val notes: List<JSONObject> = emptyList(),
+) {
+    val isUser get() = role == "user"
+    val isError get() = role == "error"
+
+    companion object {
+        fun of(o: JSONObject) = Msg(
+            o.optString("id"), o.optString("role"), o.optDouble("ts", 0.0), o.optString("text"),
+            o.optJSONArray("media").strings(), o.optBoolean("ephemeral"), o.str("client_id"),
+            TurnInfo.of(o.optJSONObject("turn")), o.str("source"),
+            notes = o.optJSONArray("notes").objects(),
+        )
+    }
+}
+
+/** The reply being written right now (rebuilt from /state + live events). */
+/** A web search in progress: which engine, Reddit or not, the sites seen so far, what it's reading. */
+data class SearchLive(
+    val query: String, val engine: String = "", val reddit: Boolean = false, val stage: String = "starting",
+    val sites: List<String> = emptyList(), val preview: String = "", val started: Long = System.currentTimeMillis(),
+)
+
+/** A picture being made: which model, its usual time (for the estimated bar), half-drawn previews, a model switch. */
+data class ImageLive(
+    val name: String, val provider: String, val expected: Double, val stage: String = "start",
+    val partial: String? = null, val note: String? = null, val attempt: Int = 1, val refs: Int = 0,
+    val started: Long = System.currentTimeMillis(),
+)
+
+data class LiveTurn(
+    val id: String, val started: Double, val partial: String, val status: String, val tool: String?,
+    val tools: List<ToolCall>, val shell: List<String>, val source: String, val media: List<String> = emptyList(),
+    val stopping: Boolean = false, val search: SearchLive? = null, val image: ImageLive? = null,
+) {
+    companion object {
+        fun of(o: JSONObject) = LiveTurn(
+            // measured on the phone's clock (the Pi's clock may differ): now - how long it has been running
+            o.optString("id"), System.currentTimeMillis() / 1000.0 - o.optDouble("elapsed", 0.0), o.optString("partial"),
+            o.optString("status", "Thinking"), o.str("tool"), o.optJSONArray("tools").objects().map(ToolCall::of),
+            emptyList(), o.optString("source", "app"),
+        )
+    }
+}
+
+data class ChatSettings(
+    val summary: String, val persona: String?, val model: ModelRef?, val reasoning: String?, val imageModel: String?,
+    val tools: List<String>, val loadedTools: List<String>, val sysPrimary: String, val sysSecondary: String, val pinnedTopics: List<String>,
+    val proactive: Boolean, val starred: Boolean, val hidden: Boolean, val group: String?, val tags: List<String>,
+    val customIcon: String?, val showShell: Boolean,
+    val effectiveModel: ModelRef? = null, val modelWhy: String = "",
+    val webSearchModel: ModelRef? = null, val searchDirect: Boolean? = null, val redditMode: String? = null,
+    val imageChat: Boolean = false, val lastImagePrompt: String? = null, val vanish: Boolean = false,
+    val claudeHost: String? = null, val claudeProvider: String? = null, val claudeModel: String? = null,
+) {
+    companion object {
+        fun of(o: JSONObject?): ChatSettings? {
+            o ?: return null
+            return ChatSettings(
+                o.optString("summary"), o.str("persona"), ModelRef.of(o.optJSONObject("model")), o.str("reasoning"),
+                o.str("image_model"), o.optJSONArray("tools").strings(), o.optJSONArray("loaded_tools").strings(), o.optString("sys_primary"), o.optString("sys_secondary"),
+                o.optJSONArray("pinned_topics").strings(), o.optBoolean("proactive"), o.optBoolean("starred"), o.optBoolean("hidden"),
+                o.str("group"), o.optJSONArray("tags").strings(), o.str("custom_icon"), o.optBoolean("show_shell", true),
+                ModelRef.of(o.optJSONObject("effective_model")), o.optJSONObject("effective_model")?.optString("why").orEmpty(),
+                ModelRef.of(o.optJSONObject("web_search_model")),
+                if (o.isNull("search_direct") || !o.has("search_direct")) null else o.optBoolean("search_direct"),
+                o.str("reddit_mode"),
+                o.optBoolean("image_chat"), o.str("last_image_prompt"), o.optBoolean("vanish"),
+                o.str("claude_host"), o.str("claude_provider"), o.str("claude_model"),
+            )
+        }
+    }
+}
+
+data class ChatStyle(val userBubble: Long?, val aiBubble: Long?, val overlay: Float?)
+
+data class Persona(
+    val name: String, val displayName: String, val tagline: String, val bestFor: String, val traits: List<String>,
+    val model: String, val reasoning: String, val needsProactive: Boolean, val tools: List<String>,
+    val hasIcon: Boolean, val hasBackground: Boolean, val style: ChatStyle?, val tokens: Int,
+    val iconV: Long = 0, val bgV: Long = 0,
+) {
+    val iconUrl get() = if (hasIcon) Net.url("/api/personas/$name/icon?v=$iconV") else null
+    val backgroundUrl get() = if (hasBackground) Net.url("/api/personas/$name/background?v=$bgV") else null
+
+    companion object {
+        private fun hex(s: String?): Long? = s?.removePrefix("#")?.takeIf { it.length == 6 }?.toLongOrNull(16)?.let { 0xFF000000 or it }
+        fun of(o: JSONObject) = Persona(
+            o.optString("name"), o.optString("display_name").ifBlank { o.optString("name") }, o.optString("tagline"),
+            o.optString("best_for"), o.optJSONArray("traits").strings(), o.optString("model"), o.optString("reasoning_effort"),
+            o.optBoolean("needs_proactive"), o.optJSONArray("enable_tools").strings(),
+            o.optBoolean("has_icon"), o.optBoolean("has_background"),
+            o.optJSONObject("chat_style")?.let { ChatStyle(hex(it.str("bubbleUserHex")), hex(it.str("bubbleAiHex")), if (it.has("overlayOpacity")) it.optDouble("overlayOpacity").toFloat() else null) },
+            o.optInt("persona_md_tokens"), o.optLong("icon_mtime"), o.optLong("background_mtime"),
+        )
+    }
+}
+
+data class ToolInfo(val name: String, val description: String)
+
+data class CatalogModel(
+    val id: String, val name: String, val description: String, val context: Int?,
+    val inPrice: Double?, val outPrice: Double?, val modality: String, val tags: List<String>,
+) {
+    companion object {
+        fun of(o: JSONObject) = CatalogModel(
+            o.optString("id"), o.optString("name").ifBlank { o.optString("id") }, o.optString("description"),
+            if (o.isNull("context_length")) null else o.optInt("context_length"),
+            if (o.isNull("input_cost_per_1m")) null else o.optDouble("input_cost_per_1m"),
+            if (o.isNull("output_cost_per_1m")) null else o.optDouble("output_cost_per_1m"),
+            o.optString("modality"), o.optJSONArray("tags").strings(),
+        )
+    }
+}
+
+/** Live Pi↔PC latency for the Claude persona host selector. */
+data class ClaudePing(val piMs: Int = 0, val pcMs: Int = -1) {
+    companion object {
+        fun of(o: JSONObject) = ClaudePing(
+            o.optInt("pi_ms", 0),
+            o.optInt("pc_ms", -1),
+        )
+    }
+}
+
+/** Config chosen in ClaudeSetupSheet before creating a Claude CLI session. */
+data class ClaudeSessionConfig(
+    val host: String = "pi",          // "pi" | "pc"
+    val provider: String = "subscription", // "subscription" | "openrouter" | "ghostcli"
+    val model: String? = null,
+) {
+    fun toJSONObject(): JSONObject = JSONObject().apply {
+        put("persona", "claude")
+        put("claude_host", host)
+        put("claude_provider", provider)
+        model?.let { put("claude_model", it) }
+    }
+}

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.XUmbra" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0B0612</item>
+        <item name="android:statusBarColor">#150C21</item>
+        <item name="android:navigationBarColor">#150C21</item>
+    </style>
+</resources>

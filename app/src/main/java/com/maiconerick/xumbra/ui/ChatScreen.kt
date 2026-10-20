@@ -1,0 +1,1070 @@
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
+package com.maiconerick.xumbra.ui
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.media.MediaRecorder
+import android.net.Uri
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.core.content.FileProvider
+import coil.compose.AsyncImage
+import com.maiconerick.xumbra.App
+import com.maiconerick.xumbra.data.*
+import com.maiconerick.xumbra.ui.theme.*
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.io.File
+
+@Composable
+fun ChatScreen(sid: String) {
+    val ctx = LocalContext.current
+    val state by Umbra.chat(sid).collectAsState()
+    val rows by Umbra.sessions.collectAsState()
+    val personas by Umbra.personas.collectAsState()
+    val row = rows.firstOrNull { it.id == sid }
+    val settings = state.settings
+    val persona = personas.firstOrNull { it.name == (settings?.persona ?: row?.persona) }
+    var settingsOpen by remember { mutableStateOf(false) }
+    var inspect by remember { mutableStateOf(false) }
+    var debug by remember { mutableStateOf(false) }
+    var context by remember { mutableStateOf(false) }
+    var lab by remember { mutableStateOf(false) }
+    var memLog by remember { mutableStateOf(false) }
+    var menu by remember { mutableStateOf(false) }
+    var viewer by remember { mutableStateOf<String?>(null) }
+    var sheetFor by remember { mutableStateOf<Msg?>(null) }
+
+    DisposableEffect(sid) {
+        Umbra.open(sid)
+        Umbra.visibleSid = sid
+        Umbra.markRead(sid)
+        Notifier.clear(sid)
+        onDispose { Umbra.close(sid); if (Umbra.visibleSid == sid) Umbra.visibleSid = null }
+    }
+    LaunchedEffect(state.messages.size) { if (Umbra.foreground) { Umbra.markRead(sid); Notifier.clear(sid) } }
+
+    if (settingsOpen) ChatSettingsPage(sid) { settingsOpen = false }
+    if (inspect) PromptInspectorPage(sid) { inspect = false }
+    if (debug) DebugEventsPage(sid) { debug = false }
+    if (context) ContextPage(sid) { context = false }
+    if (lab) LabPage(sid) { lab = false }
+    if (memLog) MemoryLogPage(sid) { memLog = false }
+    viewer?.let { CompositionLocalProvider(LocalImageChat provides sid) { ImageViewer(it) { viewer = null } } }
+    sheetFor?.let { m -> MsgSheet(sid, m, isLastUser = state.messages.lastOrNull { it.isUser && !it.pending }?.id == m.id) { sheetFor = null } }
+
+    Box(Modifier.fillMaxSize()) {
+        ChatAmbient()
+        Column(Modifier.fillMaxSize().imePadding()) {
+            // header (drawn above the list so the spider can dangle over it)
+            Box(Modifier.zIndex(1f).fillMaxWidth().background(Spook.Crypt).statusBarsPadding()) {
+                Row(Modifier.fillMaxWidth().heightIn(min = 60.dp).padding(top = 4.dp, bottom = 6.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { Nav.back() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Spook.Bone) }
+                    Box(Modifier.clip(CircleShape).clickable { settingsOpen = true }) { ChatAvatar(sid, row?.title ?: "", settings?.customIcon ?: row?.customIcon, persona, 40) }
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f).clickable { settingsOpen = true }) {
+                        Text(row?.title ?: settings?.summary?.ifBlank { null } ?: "Chat $sid", color = Spook.Bone, fontWeight = FontWeight.SemiBold, fontSize = 17.sp,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        val t = state.turn
+                        val sub = when {
+                            t != null -> when {
+                                t.search != null -> "🔎 searching " + (if (t.search.reddit) "Reddit + the web…" else "the web…")
+                                t.tool != null -> "✍ running ${t.tool}…"
+                                t.partial.isNotEmpty() -> "✍ writing…"
+                                else -> "✍ " + t.status.lowercase().ifBlank { "thinking" } + "…"
+                            }
+                            else -> ""
+                        }
+                        if (t != null) Text(sub, color = Spook.Slime, fontSize = 12.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        else HeaderMoney(settings?.effectiveModel ?: settings?.model ?: row?.model, row?.costUsd ?: 0.0,
+                            (row?.tokensIn ?: 0) + (row?.tokensOut ?: 0))
+                    }
+                    ContextChip(state.messages) { context = true }
+                    IconButton(onClick = { settingsOpen = true }) { Icon(Icons.Default.Tune, "Chat settings", tint = Spook.Mist) }
+                    Box {
+                        IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, null, tint = Spook.Mist) }
+                        DropdownMenu(menu, { menu = false }, containerColor = Spook.Crypt2) {
+                            DropdownMenuItem(text = { Text("📝 What was saved to memory", color = Spook.Bone) }, onClick = { menu = false; memLog = true })
+                            DropdownMenuItem(text = { Text("◔ Context window", color = Spook.Bone) }, onClick = { menu = false; context = true })
+                            DropdownMenuItem(text = { Text("🧪 Model lab (costs go to this chat)", color = Spook.Bone) }, onClick = { menu = false; lab = true })
+                            DropdownMenuItem(text = { Text("🔍 What Umbra sees (prompt)", color = Spook.Bone) }, onClick = { menu = false; inspect = true })
+                            DropdownMenuItem(text = { Text("🐞 What Umbra did (debug)", color = Spook.Bone) }, onClick = { menu = false; debug = true })
+                            DropdownMenuItem(text = { Text("↻ Answer the last message again", color = Spook.Bone) }, onClick = { menu = false; Umbra.retry(sid) })
+                            DropdownMenuItem(text = { Text("⟳ Reload", color = Spook.Bone) }, onClick = { menu = false; Umbra.open(sid) })
+                        }
+                    }
+                }
+                HangingSpider(24.dp, Modifier.align(Alignment.BottomEnd).padding(end = 96.dp))
+            }
+            // Claude CLI persona banner — shows host, provider and model when active
+            if ((settings?.persona ?: row?.persona) == "claude") {
+                val cHost = state.settings?.claudeHost.orEmpty()
+                val cProv = state.settings?.claudeProvider.orEmpty()
+                val cModel = state.settings?.claudeModel.orEmpty()
+                if (cHost.isNotBlank()) {
+                    Row(Modifier.fillMaxWidth().background(Spook.Pumpkin.copy(alpha = 0.15f)).padding(horizontal = 14.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Text("⚡ Claude CLI", color = Spook.Pumpkin, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Text(" on ${cHost.uppercase()} via ${cProv.ifBlank { "default" }}${if (cModel.isNotBlank()) " · $cModel" else ""}",
+                            color = Spook.Mist, fontSize = 11.5.sp, fontFamily = FontFamily.Monospace)
+                    }
+                }
+            }
+            // The task list of this chat (todo tool): one line, tap to open it all.
+            TodoBar((settings ?: state.settings)?.todos ?: emptyList())
+            state.error?.takeIf { state.messages.isEmpty() }?.let { Banner("Couldn't load: $it — tap to retry") { Umbra.open(sid) } }
+            state.suggestion?.let { (name, reason) -> SuggestionBar(sid, name, reason) }
+
+            CompositionLocalProvider(LocalImageChat provides sid) {
+                MessageList(sid, state, persona, Modifier.weight(1f), onImage = { viewer = it }, onLong = { sheetFor = it })
+            }
+            Composer(sid, state)
+        }
+    }
+}
+
+/** Under the chat title: which model answers · what this chat cost · wallet. */
+@Composable
+private fun HeaderMoney(m: ModelRef?, chatCost: Double, chatTokens: Long = 0) {
+    val bal by Money.balances.collectAsState()
+    LaunchedEffect(Unit) { Money.start() }
+    val tint = if (m != null) sourceColor(m.provider) else Spook.Witch
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        if (m != null) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Filled.Memory, null, tint = tint, modifier = Modifier.size(13.dp))
+                Spacer(Modifier.width(4.dp))
+                Text(Money.sourceName(m.provider), color = tint, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                Text(" " + modelName(m.provider, m.model), color = Spook.Bone, fontSize = 12.sp, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Filled.Paid, null, tint = Spook.Slime, modifier = Modifier.size(13.dp))
+            Spacer(Modifier.width(3.dp))
+            Text(Fmt.money(chatCost), color = Spook.Slime, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+            if (chatTokens > 0) {
+                Spacer(Modifier.width(8.dp))
+                Icon(Icons.Filled.Bolt, null, tint = Spook.Witch, modifier = Modifier.size(13.dp))
+                Spacer(Modifier.width(2.dp))
+                Text(Fmt.tokens(chatTokens), color = Spook.Witch, fontSize = 12.sp, maxLines = 1)
+            }
+            Spacer(Modifier.width(8.dp))
+            Icon(Icons.Filled.AccountBalanceWallet, null, tint = Spook.Pumpkin, modifier = Modifier.size(13.dp))
+            Spacer(Modifier.width(3.dp))
+            val wallet = when (m?.provider) {
+                "openai" -> "OpenAI today " + Fmt.money(Money.spentToday("openai"))
+                "gemini" -> "Gemini today " + Fmt.money(Money.spentToday("gemini"))
+                else -> Money.orRemaining()?.let { Fmt.usd(it) } ?: ""
+            }
+            bal.let { }
+            Text(wallet, color = Spook.Pumpkin, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+/** Live web search: engine, Reddit or not, sites popping in as the engine cites them, a peek at what it's reading. */
+@Composable
+private fun SearchCard(s: SearchLive) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(s.started) { while (true) { now = System.currentTimeMillis(); delay(250) } }
+    val secs = ((now - s.started) / 1000).coerceAtLeast(0)
+    val pulse = rememberInfiniteTransition(label = "search").animateFloat(0.4f, 1f, infiniteRepeatable(tween(650), RepeatMode.Reverse), label = "p")
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(Color(0x55000000)).padding(10.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("🔎", fontSize = 14.sp, modifier = Modifier.graphicsLayer { alpha = pulse.value })
+            Spacer(Modifier.width(6.dp))
+            Text(if (s.reddit) "Searching Reddit + the web" else "Searching the web", color = Spook.Bone, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            if (s.reddit) RedditBadge()
+            Spacer(Modifier.width(6.dp))
+            Text("${secs}s", color = Spook.Mist, fontSize = 11.sp)
+        }
+        if (s.query.isNotBlank()) Text("“${s.query}”", color = Spook.Moon, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(when (s.stage) {
+            "starting", "asking" -> "asking ${s.engine.ifBlank { "the search engine" }}…"
+            "searching" -> "${s.engine.ifBlank { "engine" }} is searching…"
+            "reading" -> "reading ${if (s.sites.isEmpty()) "results" else "${s.sites.size} sources"}…"
+            else -> "got it — Umbra is reading the results"
+        }, color = Spook.Mist, fontSize = 11.5.sp)
+        if (s.sites.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            s.sites.forEach { site ->
+                val isReddit = site.contains("reddit")
+                Text(site, color = if (isReddit) Color(0xFFFF4500) else Spook.Bone, fontSize = 10.5.sp,
+                    modifier = Modifier.clip(RoundedCornerShape(50)).background(Spook.Crypt3).padding(horizontal = 7.dp, vertical = 2.dp))
+            }
+        }
+        if (s.preview.isNotBlank()) Text("…" + s.preview.replace("\n", " ").takeLast(160), color = Spook.Fog, fontSize = 11.sp,
+            fontStyle = FontStyle.Italic, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** What happened when a model refused and another one drew the picture. */
+@Composable
+private fun ImageNote(text: String) {
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Color(0x33FFB020)).padding(horizontal = 8.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.Top) {
+        Text("⚠️", fontSize = 12.sp)
+        Spacer(Modifier.width(6.dp))
+        Text(text, color = Color(0xFFFFD27A), fontSize = 12.sp, lineHeight = 16.sp)
+    }
+}
+
+/**
+ * Live picture: model + source, an estimated bar (no image API reports a real %, so it
+ * follows how long this model usually takes on the Pi), OpenAI's half-drawn previews,
+ * code-art stages and any model switch.
+ */
+@Composable
+private fun ImageCard(im: ImageLive) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(im.started) { while (true) { now = System.currentTimeMillis(); delay(200) } }
+    val secs = ((now - im.started) / 1000.0).coerceAtLeast(0.0)
+    val exp = im.expected.coerceAtLeast(2.0)
+    // eases toward 95 % at the usual time, then creeps (never claims done before it is)
+    val frac = if (secs <= exp) (secs / exp * 0.9) else (0.9 + 0.08 * (1 - Math.exp(-(secs - exp) / exp)))
+    val bar by animateFloatAsState(frac.toFloat().coerceIn(0f, 0.98f), tween(300), label = "img")
+    val color = sourceColor(im.provider)
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(Color(0x55000000)).padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("🎨", fontSize = 14.sp)
+            Spacer(Modifier.width(6.dp))
+            Column(Modifier.weight(1f)) {
+                Text(Money.sourceName(im.provider), color = color, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                Text((if (im.refs > 0) "Editing with " else "Painting with ") + im.name, color = Spook.Bone, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            }
+            Text("${secs.toInt()}s", color = Spook.Mist, fontSize = 11.sp)
+        }
+        im.note?.let { ImageNote(it) }
+        im.partial?.let { p ->
+            Box {
+                AsyncImage(Net.mediaUrl(p), null, contentScale = ContentScale.Crop,
+                    modifier = Modifier.size(200.dp).clip(RoundedCornerShape(10.dp)))
+                Text("preview · still drawing", color = Color.White, fontSize = 10.sp,
+                    modifier = Modifier.align(Alignment.BottomStart).padding(5.dp).clip(RoundedCornerShape(4.dp)).background(Color(0x99000000)).padding(horizontal = 5.dp, vertical = 1.dp))
+            }
+        }
+        Box(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(Spook.Crypt3)) {
+            Box(Modifier.fillMaxWidth(bar).fillMaxHeight().clip(RoundedCornerShape(3.dp)).background(color))
+        }
+        Text(when (im.stage) {
+            "writing" -> if (im.attempt > 1) "rewriting the script…" else "the model is writing the drawing script…"
+            "fixing" -> "the script failed — fixing it (try ${im.attempt})…"
+            "running" -> "running the script on the Pi…"
+            "partial" -> "drawing — ≈${(bar * 100).toInt()}%"
+            else -> if (secs <= exp) "≈${(bar * 100).toInt()}% · usually ~${exp.toInt()} s"
+                    else "taking longer than usual (~${exp.toInt()} s)…"
+        }, color = Spook.Mist, fontSize = 11.sp)
+    }
+}
+
+@Composable
+fun RedditBadge() {
+    Box(Modifier.size(16.dp).clip(CircleShape).background(Color(0xFFFF4500)), contentAlignment = Alignment.Center) {
+        Text("r/", color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+// ───────────── message list ─────────────
+
+private sealed class Item(val key: String) {
+    class Day(val label: String, k: String) : Item(k)
+    class M(val m: Msg) : Item(m.clientId?.takeIf { m.pending }?.let { "c-$it" } ?: m.id)
+    class Live(val t: LiveTurn) : Item("live")
+    object More : Item("more")
+}
+
+@Composable
+private fun MessageList(sid: String, st: ChatState, persona: Persona?, modifier: Modifier, onImage: (String) -> Unit, onLong: (Msg) -> Unit) {
+    val list = rememberLazyListState()
+    val items = remember(st.messages, st.queued, st.turn, st.hasMore) {
+        val out = ArrayList<Item>()
+        // reverse layout: newest first
+        st.turn?.let { out += Item.Live(it) }
+        st.queued.asReversed().forEach { out += Item.M(it) }
+        val msgs = st.messages
+        for (i in msgs.indices.reversed()) {
+            val m = msgs[i]
+            out += Item.M(m)
+            val prev = msgs.getOrNull(i - 1)
+            if (!m.pending && (prev == null || Fmt.dayKey(prev.ts) != Fmt.dayKey(m.ts))) out += Item.Day(Fmt.day(m.ts), "d-${Fmt.dayKey(m.ts)}-${m.id}")
+        }
+        if (st.hasMore) out += Item.More
+        out
+    }
+    // stick to the bottom when something new arrives and we're already there
+    // `away` = the user scrolled up to read; remembered when a drag/fling ends so streaming never drags them back down
+    var away by remember { mutableStateOf(false) }
+    LaunchedEffect(list) {
+        snapshotFlow { list.isScrollInProgress }.collect { moving ->
+            if (!moving) away = !(list.firstVisibleItemIndex == 0 && list.firstVisibleItemScrollOffset < 80)
+        }
+    }
+    // a new message/turn arrived: show it (always for something the user just sent)
+    LaunchedEffect(items.firstOrNull()?.key) {
+        val first = items.firstOrNull()
+        val own = first is Item.M && first.m.isUser
+        if (own || (!away && list.firstVisibleItemIndex <= 1)) list.scrollToItem(0)
+    }
+    // the reply is growing: it stays pinned to the bottom by itself; only re-assert that while the user is there and not touching the list
+    LaunchedEffect(st.turn?.partial?.length) {
+        if (!away && !list.isScrollInProgress && list.firstVisibleItemIndex == 0 && list.firstVisibleItemScrollOffset < 80) list.scrollToItem(0)
+    }
+    val nearTop by remember { derivedStateOf { list.layoutInfo.totalItemsCount > 0 && (list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) >= list.layoutInfo.totalItemsCount - 3 } }
+    LaunchedEffect(nearTop) { if (nearTop && st.hasMore) Umbra.loadOlder(sid) }
+    val scope = rememberCoroutineScope()
+    val rowsNow by Umbra.sessions.collectAsState()
+    val vanish = st.settings?.vanish == true || rowsNow.firstOrNull { it.id == sid }?.vanish == true
+    Box(modifier) {
+        LazyColumn(Modifier.fillMaxSize(), state = list, reverseLayout = true, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            items(items, key = { it.key }) { it ->
+                when (it) {
+                    is Item.Day -> DayChip(it.label)
+                    is Item.M -> if (vanish && (it.m.isUser || it.m.role == "assistant") && it.m.text.isNotBlank()) VanishBubble(it.m, it.m.isUser)
+                                 else MsgBubble(sid, it.m, persona, onImage, onLong)
+                    is Item.Live -> LiveBubble(sid, it.t, persona, st.settings?.showShell != false, hideText = vanish)
+                    Item.More -> Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        Text("⬆ older messages", color = Spook.Mist, fontSize = 12.sp, modifier = Modifier.clip(RoundedCornerShape(50)).clickable { Umbra.loadOlder(sid) }.padding(10.dp))
+                    }
+                }
+            }
+            if (!st.loaded && st.messages.isEmpty()) item {
+                Box(Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) { FloatingGhost(48.dp) }
+            }
+            if (st.loaded && st.messages.isEmpty() && st.turn == null) item {
+                Column(Modifier.fillMaxWidth().padding(36.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    PixelSprite(Sprites.cauldron, 56.dp)
+                    Text(persona?.tagline?.ifBlank { null } ?: "Say something to wake Umbra.", color = Spook.Mist, fontSize = 13.sp)
+                }
+            }
+        }
+        val showJump by remember { derivedStateOf { list.firstVisibleItemIndex > 3 } }
+        if (showJump) Box(Modifier.align(Alignment.BottomEnd).padding(12.dp).size(40.dp).clip(CircleShape).background(Spook.Crypt3)
+            .clickable { scope.launch { list.animateScrollToItem(0) } }, contentAlignment = Alignment.Center) {
+            Icon(Icons.Default.KeyboardDoubleArrowDown, null, tint = Spook.Pumpkin)
+        }
+    }
+}
+
+@Composable
+private fun DayChip(label: String) {
+    Box(Modifier.fillMaxWidth().padding(vertical = 4.dp), contentAlignment = Alignment.Center) {
+        Text(label, color = Spook.Mist, fontSize = 11.5.sp, modifier = Modifier.clip(RoundedCornerShape(50)).background(Spook.Crypt2.copy(alpha = 0.85f)).padding(horizontal = 12.dp, vertical = 4.dp))
+    }
+}
+
+private val textSize get() = 15f * App.prefs.textScale
+
+@Composable
+private fun MsgBubble(sid: String, m: Msg, persona: Persona?, onImage: (String) -> Unit, onLong: (Msg) -> Unit) {
+    when {
+        m.isUser -> UserBubble(sid, m, onImage, onLong)
+        m.isError -> ErrorBubble(sid, m, onLong)
+        else -> AssistantBubble(m, persona, onImage, onLong)
+    }
+}
+
+@Composable
+private fun UserBubble(sid: String, m: Msg, onImage: (String) -> Unit, onLong: (Msg) -> Unit) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+        Column(Modifier.widthIn(max = 320.dp).clip(RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp)).background(Spook.outBubble)
+            .then(if (Spook.palette.outBorder != 0L) Modifier.border(1.dp, Spook.OutBorder, RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp)) else Modifier)
+            .combinedClickable(onClick = {}, onLongClick = { onLong(m) }).padding(horizontal = 12.dp, vertical = 8.dp)) {
+            val imgs = m.media.map { Net.mediaUrl(it) }.ifEmpty { m.localImages }
+            if (m.media.isNotEmpty()) MediaBlock(m.media, onImage) else if (imgs.isNotEmpty()) ImageGrid(imgs, onImage)
+            if (m.text.isNotBlank()) Text(inline(m.text, Spook.Moon), color = Spook.Bone, fontSize = textSize.sp, lineHeight = (textSize * 1.35f).sp)
+            Row(Modifier.align(Alignment.End).padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (m.ephemeral) Text("👻 ", fontSize = 10.sp)
+                Text(if (m.pending) (if (m.ts == Double.MAX_VALUE) "queued" else Fmt.time(m.ts)) else Fmt.time(m.ts), color = Spook.Bone.copy(alpha = 0.6f), fontSize = 10.5.sp)
+                Spacer(Modifier.width(4.dp))
+                when {
+                    m.failed != null -> Text("⚠", color = Spook.Blood, fontSize = 11.sp)
+                    m.pending -> Text("🕓", fontSize = 9.sp)
+                    else -> Text("✓", color = Spook.Bone.copy(alpha = 0.6f), fontSize = 10.sp)
+                }
+            }
+        }
+    }
+    if (m.failed != null) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+        Text("Not sent: ${m.failed}  ", color = Spook.Blood, fontSize = 11.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+        Pill("Retry", false, small = true) { Umbra.retryFailed(sid, m) }
+        Spacer(Modifier.width(4.dp))
+        Pill("Discard", false, small = true) { Umbra.discard(sid, m) }
+    } else if (m.pending && m.ts == Double.MAX_VALUE) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+        Text("waits for the current reply · ", color = Spook.Mist, fontSize = 11.sp)
+        Text("cancel", color = Spook.Pumpkin, fontSize = 11.sp, modifier = Modifier.clickable { Umbra.unqueue(sid, m) })
+    }
+}
+
+@Composable
+private fun ErrorBubble(sid: String, m: Msg, onLong: (Msg) -> Unit) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+        Column(Modifier.widthIn(max = 330.dp).clip(RoundedCornerShape(14.dp)).background(Color(0x55C8243F)).border(1.dp, Spook.Blood.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
+            .combinedClickable(onClick = {}, onLongClick = { onLong(m) }).padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("⚠ " + m.text, color = Spook.Bone, fontSize = 14.sp)
+            m.turn?.error?.let { Text(it.take(300), color = Spook.Mist, fontSize = 11.sp, fontFamily = FontFamily.Monospace) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(Fmt.time(m.ts), color = Spook.Mist, fontSize = 10.5.sp, modifier = Modifier.weight(1f))
+                Pill("↻ Try again", true, small = true) { Umbra.retry(sid) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AssistantBubble(m: Msg, persona: Persona?, onImage: (String) -> Unit, onLong: (Msg) -> Unit) {
+    val t = m.turn
+    val hasTools = t != null && t.tools.isNotEmpty()
+    // 0 = final answer, 1 = process (the tool cards seen while it was working), 2 = stats (tokens, cache, memory, model)
+    var view by remember(m.id) { mutableStateOf(0) }
+    val open = view == 2
+    val step = if (hasTools) 3 else 2
+    val aiColor = persona?.style?.aiBubble?.let { Color(it) } ?: Spook.InBubble
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp)).background(aiColor.copy(alpha = 0.92f))
+            .then(if (Spook.palette.inBorder != 0L) Modifier.border(1.dp, Spook.InBorder, RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp)) else Modifier)
+            .combinedClickable(onClick = { if (App.prefs.showFooters && t != null) view = (view + 1) % step }, onLongClick = { onLong(m) })
+            .padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (m.source?.startsWith("cron:") == true) Text("⏰ scheduled by an agent", color = Spook.Moon, fontSize = 11.sp)
+            t?.imageNote?.takeIf { !m.text.contains(it) }?.let { ImageNote(it) }
+            if (m.media.isNotEmpty()) MediaBlock(m.media, onImage)
+            if (view == 0) {
+                if (m.text.isNotBlank()) Markdown(m.text, size = textSize, onImage = onImage)
+                else if (t?.cancelled == true) Text("(stopped before answering)", color = Spook.Mist, fontStyle = FontStyle.Italic, fontSize = 13.sp)
+            } else if (view == 1) {
+                val tools = t?.tools.orEmpty()
+                if (tools.isNotEmpty()) ToolChips(tools) else if (m.text.isNotBlank()) Markdown(m.text, size = textSize, onImage = onImage)
+            } else {
+                if (t != null) TurnGroups(m, t) else if (m.text.isNotBlank()) Markdown(m.text, size = textSize, onImage = onImage)
+            }
+            if (App.prefs.showToolChips && t != null) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    ActionIcons(t)
+                    // Brain toggle: cycles answer -> process -> stats -> answer
+                    if (t != null) {
+                        val label = when (view) {
+                            0 -> if (hasTools) "process" else "stats"
+                            1 -> "stats"
+                            else -> "answer"
+                        }
+                        Row(
+                            Modifier.clip(RoundedCornerShape(6.dp))
+                                .background(Spook.Pumpkin.copy(alpha = if (view == 0) 0.16f else 0.30f))
+                                .clickable { view = (view + 1) % step }
+                                .padding(horizontal = 5.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(Icons.Filled.Psychology, null, tint = Spook.Pumpkin, modifier = Modifier.size(11.dp))
+                            Spacer(Modifier.width(3.dp))
+                            Text(label, color = Spook.Pumpkin, fontSize = 9.5.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+            if (m.notes.isNotEmpty()) SavedNotes(m.notes)
+            if (App.prefs.showFooters) Footer(m, t, open)
+        }
+    }
+}
+
+/** What the note-taker wrote to the memory files after this reply (tap a line to open that file). */
+@Composable
+private fun SavedNotes(notes: List<org.json.JSONObject>) {
+    var edit by remember { mutableStateOf<String?>(null) }
+    edit?.let { FileEditorPage(it) { edit = null } }
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Color(0x2245D483)).padding(horizontal = 8.dp, vertical = 5.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text("📝 Saved to memory", color = Color(0xFF7DE3A5), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        notes.forEach { n ->
+            val verb = when (n.optString("op")) { "update" -> "✎"; "remove" -> "✕"; else -> "+" }
+            val where = n.optString("page").ifBlank { "about-me" } + (n.optString("section").takeIf { it.isNotBlank() && it != "GENERAL" }?.let { " [$it]" } ?: "")
+            Text("$verb $where — ${n.optString("text").ifBlank { n.optString("old") }}", color = Spook.Bone.copy(alpha = 0.85f), fontSize = 11.5.sp,
+                maxLines = 2, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.clickable { edit = "memory/files/" + n.optString("page").ifBlank { "about-me" } + ".md" })
+        }
+    }
+}
+
+/**
+ * The task list of this chat, written by the todo tool. One line while it is
+ * closed (how many done + the step in progress), the whole list when tapped.
+ */
+@Composable
+private fun TodoBar(todos: List<Todo>) {
+    if (todos.isEmpty()) return
+    var open by remember { mutableStateOf(false) }
+    val done = todos.count { it.status == "done" }
+    val current = todos.firstOrNull { it.status == "doing" } ?: todos.firstOrNull { it.status != "done" }
+    Column(
+        Modifier.fillMaxWidth()
+            .background(Spook.Crypt2.copy(alpha = 0.85f))
+            .clickable { open = !open }
+            .padding(horizontal = 14.dp, vertical = 6.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("☑", color = Spook.Slime, fontSize = 13.sp)
+            Spacer(Modifier.width(6.dp))
+            Text("$done/${todos.size}", color = Spook.Slime, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                current?.text ?: "all done",
+                color = if (current == null) Spook.Slime else Spook.Bone,
+                fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Text(if (open) "▴" else "▾", color = Spook.Mist, fontSize = 12.sp)
+        }
+        if (open) {
+            Spacer(Modifier.height(4.dp))
+            todos.forEach { t ->
+                val (mark, tint) = when (t.status) {
+                    "done" -> "✓" to Spook.Slime
+                    "doing" -> "▶" to Spook.Pumpkin
+                    else -> "○" to Spook.Mist
+                }
+                Row(verticalAlignment = Alignment.Top, modifier = Modifier.padding(vertical = 1.dp)) {
+                    Text(mark, color = tint, fontSize = 12.sp, modifier = Modifier.width(16.dp))
+                    Text(
+                        t.text,
+                        color = if (t.status == "done") Spook.Mist else Spook.Bone,
+                        fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** The provider's own colour, so the model chip can be read at a glance. */
+private fun providerTint(provider: String?): Color = when ((provider ?: "").lowercase()) {
+    "openrouter" -> Spook.Pumpkin
+    "openai" -> Color(0xFF7DE3A5)
+    "gemini", "google" -> Spook.Moon
+    "anthropic" -> Color(0xFFE8A87C)
+    "ollama" -> Spook.Mist
+    "code" -> Spook.Witch
+    else -> Spook.Mist
+}
+
+/** One small tinted pill of the reply footer: icon + value. */
+@Composable
+private fun FootChip(icon: String, text: String, color: Color, strong: Boolean = false) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.clip(RoundedCornerShape(6.dp))
+            .background(color.copy(alpha = if (strong) 0.20f else 0.12f))
+            .padding(horizontal = 5.dp, vertical = 2.dp),
+    ) {
+        Text(icon, fontSize = 9.5.sp)
+        Spacer(Modifier.width(3.dp))
+        Text(text, color = color, fontSize = 9.5.sp, fontWeight = if (strong) FontWeight.SemiBold else FontWeight.Medium)
+    }
+}
+
+/**
+ * What a reply cost and how it was made: one coloured chip per fact, wrapping
+ * on narrow screens. Tapping the bubble (not this row) opens the full details.
+ */
+@Composable
+private fun Footer(m: Msg, t: TurnInfo?, open: Boolean) {
+    FlowRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        FootChip("🕐", Fmt.time(m.ts), Spook.Mist)
+        if (t != null) {
+            val name = t.model.substringAfterLast('/').ifBlank { t.model }
+            if (name.isNotBlank()) FootChip("🤖", name, providerTint(t.provider), strong = true)
+            if (App.prefs.showCost && t.costUsd > 0) {
+                FootChip("💰", Fmt.money(t.costUsd), Spook.Slime, strong = true)
+                if (t.imageCost > 0) FootChip("🎨", Fmt.money(t.imageCost), Spook.Pumpkin)
+            }
+            if (t.inTok > 0) FootChip("⬆", "${Fmt.tokens(t.inTok.toLong())} in", Spook.Moon)
+            if (t.cacheRead > 0) FootChip("⚡", "${Fmt.tokens(t.cacheRead.toLong())} cached", Spook.Slime)
+            if (t.outTok > 0) FootChip("⬇", "${Fmt.tokens(t.outTok.toLong())} out", Spook.Pumpkin)
+            if (t.durationSec > 0) FootChip("⏱", Fmt.secs(t.durationSec), Spook.Mist)
+            if (t.cancelled) FootChip("⏹", "stopped", Spook.Blood)
+            if (t.directSearch) FootChip("🔎", "search", Spook.Moon)
+        }
+        if (m.ephemeral) FootChip("👻", "not remembered", Spook.Mist)
+        if (t != null) FootChip(if (open) "▴" else "▾", if (open) "hide" else "details", Spook.Mist)
+    }
+}
+
+/** What happened in this turn: tokens, cost, tools with arguments/results, memory writes, prompt size. */
+@Composable
+private fun TurnDetails(t: TurnInfo) {
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(Color(0x66000000)).padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("${t.provider} / ${t.model}", color = Spook.Pumpkin, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Text("↑ ${Fmt.tokens(t.inTok.toLong())} in" + (if (t.cacheRead > 0) " (${Fmt.tokens(t.cacheRead.toLong())} cached)" else "") +
+            "  ·  ↓ ${Fmt.tokens(t.outTok.toLong())} out  ·  ${Fmt.money(t.costUsd)}  ·  ${Fmt.secs(t.durationSec)}", color = Spook.Bone, fontSize = 11.5.sp)
+        if (t.memory.isNotEmpty()) {
+            Text("Memory", color = Spook.Mist, fontSize = 11.sp)
+            t.memory.forEach { Text("🧠 ${it.title}" + if (it.detail.isNotBlank()) " — ${it.detail}" else "", color = Spook.Bone, fontSize = 11.5.sp) }
+        }
+        if (t.tools.isNotEmpty()) {
+            Text("Tools", color = Spook.Mist, fontSize = 11.sp)
+            t.tools.forEach { ToolDetail(it) }
+        }
+        if (t.breakdown.isNotEmpty()) {
+            Text("Prompt (estimated tokens)", color = Spook.Mist, fontSize = 11.sp)
+            val parts = t.breakdown.filterKeys { it != "total_estimated" }.entries.sortedByDescending { it.value }
+            val total = t.breakdown["total_estimated"] ?: parts.sumOf { it.value }
+            parts.forEach { (k, v) ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(k, color = Spook.Bone, fontSize = 11.sp, modifier = Modifier.width(130.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Box(Modifier.weight(1f)) { UsageBar(v.toDouble(), total.toDouble(), Spook.Witch, height = 6) }
+                    Text(" ${Fmt.tokens(v.toLong())}", color = Spook.Mist, fontSize = 10.5.sp, modifier = Modifier.width(44.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolDetail(c: ToolCall) {
+    var open by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Spook.Crypt3.copy(alpha = 0.6f)).clickable { open = !open }.padding(8.dp)) {
+        Text("🛠 ${c.note ?: c.name}" + (c.ms?.let { "  · ${Fmt.secs(it / 1000.0)}" } ?: "") + if (open) "" else "  ▾", color = Spook.Bone, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        if (c.args.isNotBlank()) Text(c.args, color = Spook.Moon, fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = if (open) 40 else 2, overflow = TextOverflow.Ellipsis)
+        if (open && !c.result.isNullOrBlank()) {
+            Gap(4)
+            SelectionContainer { Text(c.result, color = Spook.Mist, fontSize = 11.sp, fontFamily = FontFamily.Monospace) }
+        }
+    }
+}
+
+/** Every tool call takes two lines: what it is doing, then the command/code it runs. Tap for the output. */
+@Composable
+private fun ToolChips(tools: List<ToolCall>, running: String? = null) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        tools.forEach { c ->
+            val live = c.result == null && running != null
+            val failed = c.result?.startsWith("ERROR") == true || c.result?.startsWith("[exit") == true || c.result?.startsWith("BLOCKED") == true
+            var open by remember(c.callId, c.result) { mutableStateOf(false) }
+            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Spook.Crypt3.copy(alpha = 0.55f))
+                .clickable { open = !open }.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                // the sentence the model wrote just before this step, part of the process
+                c.text?.takeIf { it.isNotBlank() }?.let {
+                    Text(it, color = Spook.Bone.copy(alpha = 0.85f), fontSize = 12.sp,
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 5.dp))
+                }
+                // line 1 - a plain sentence: what Umbra is doing, no jargon
+                Row(verticalAlignment = Alignment.Top) {
+                    if (live) CircularProgressIndicator(Modifier.padding(top = 2.dp).size(10.dp), color = Spook.Pumpkin, strokeWidth = 1.5.dp)
+                    else Text(if (failed) "✗" else "✓", color = if (failed) Spook.Blood else Spook.Slime, fontSize = 11.sp)
+                    Spacer(Modifier.width(6.dp))
+                    Text(c.note ?: ("Using " + c.name), color = Spook.Bone, fontSize = 12.sp, maxLines = 2,
+                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    c.ms?.let { Spacer(Modifier.width(6.dp)); Text(Fmt.secs(it / 1000.0), color = Spook.Mist, fontSize = 10.sp) }
+                }
+                // line 2 - the actual command / code / query, in monospace
+                if (c.args.isNotBlank()) {
+                    Text(c.args, color = Color(0xFFB9F27A), fontFamily = FontFamily.Monospace, fontSize = 11.sp,
+                        maxLines = if (open) 30 else 2, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp).clip(RoundedCornerShape(6.dp))
+                            .background(Color(0xCC07040C)).padding(horizontal = 6.dp, vertical = 4.dp))
+                }
+                if (open && !c.result.isNullOrBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    SelectionContainer { Text(c.result, color = Spook.Mist, fontSize = 11.sp, fontFamily = FontFamily.Monospace) }
+                }
+            }
+        }
+    }
+}
+
+/** The reply being written right now. */
+@Composable
+private fun LiveBubble(sid: String, t: LiveTurn, persona: Persona?, showShell: Boolean, hideText: Boolean = false) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(t.id) { while (true) { now = System.currentTimeMillis(); delay(500) } }
+    val elapsed = (now / 1000.0 - t.started).coerceAtLeast(0.0)
+    val pulse = rememberInfiniteTransition(label = "pulse").animateFloat(0.45f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "a")
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp)).background((persona?.style?.aiBubble?.let { Color(it) } ?: Spook.InBubble).copy(alpha = 0.92f))
+            .border(1.dp, Spook.Pumpkin.copy(alpha = pulse.value * 0.6f), RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp))
+            .padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (t.source.startsWith("cron:")) Text("⏰ an agent asked Umbra", color = Spook.Moon, fontSize = 11.sp)
+            if (t.tools.isNotEmpty()) ToolCallCards(t.tools, running = t.tool)
+            if (showShell && App.prefs.showLiveShell && t.tool != null && t.shell.isNotEmpty()) {
+                Text(t.shell.joinToString("\n"), color = Color(0xFFB9F27A), fontFamily = FontFamily.Monospace, fontSize = 11.sp, maxLines = 4,
+                    overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)).background(Color(0xCC07040C)).padding(6.dp))
+            }
+            if (t.media.isNotEmpty()) MediaBlock(t.media) { }
+            t.search?.let { SearchCard(it) }
+            t.image?.let { ImageCard(it) }
+            if (t.partial.isNotEmpty() && !hideText) {
+                if (App.prefs.matrixStream) MatrixStreamText(text = t.partial, key = t.id, animate = true, size = textSize)
+                else Markdown(t.partial, size = textSize, cursor = true)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                FlappingBat(14.dp)
+                Spacer(Modifier.width(6.dp))
+                val toolCount = t.tools.size
+                val budgetLabel = if (toolCount > 0) " · 🔧$toolCount/${t.maxLoops}" else ""
+                Text((if (t.stopping) "stopping" else if (t.tool == null && t.partial.isNotEmpty()) "writing" else t.status.ifBlank { "thinking" }).lowercase() + " · " + (if (elapsed < 60) "${elapsed.toInt()}s" else Fmt.secs(elapsed)) + budgetLabel,
+                    color = Spook.Mist, fontSize = 11.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (!t.stopping) Text("■ stop", color = Spook.Blood, fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.clip(RoundedCornerShape(50)).clickable { Umbra.cancel(sid) }.padding(horizontal = 8.dp, vertical = 3.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun ImageGrid(urls: List<String>, onImage: (String) -> Unit) {
+    if (urls.size == 1) {
+        PictureWithActions(urls[0], onImage) { m ->
+            AsyncImage(urls[0], null, contentScale = ContentScale.FillWidth, modifier = Modifier.widthIn(max = 300.dp).heightIn(max = 360.dp).clip(RoundedCornerShape(10.dp)).then(m))
+        }
+    } else FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        urls.forEach { u ->
+            PictureWithActions(u, onImage) { m -> AsyncImage(u, null, contentScale = ContentScale.Crop, modifier = Modifier.size(140.dp).clip(RoundedCornerShape(8.dp)).then(m)) }
+        }
+    }
+}
+
+@Composable
+private fun SuggestionBar(sid: String, name: String, reason: String) {
+    val scope = rememberCoroutineScope()
+    Row(Modifier.fillMaxWidth().background(Spook.Witch.copy(alpha = 0.35f)).padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("💡 New topic? Start \"$name\"", color = Spook.Bone, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            if (reason.isNotBlank()) Text(reason, color = Spook.Mist, fontSize = 11.5.sp, maxLines = 2)
+        }
+        Pill("Start", true, small = true) {
+            scope.launch {
+                val persona = Umbra.chat(sid).value.settings?.persona
+                val id = Umbra.create(org.json.JSONObject().put("summary", name).put("persona", persona ?: ""))
+                Umbra.chat(sid).value = Umbra.chat(sid).value.copy(suggestion = null)
+                if (id != null) Nav.openChat(id)
+            }
+        }
+        Spacer(Modifier.width(6.dp))
+        Pill("✕", false, small = true) { Umbra.chat(sid).value = Umbra.chat(sid).value.copy(suggestion = null) }
+    }
+}
+
+// ───────────── composer ─────────────
+
+@Composable
+private fun Composer(sid: String, st: ChatState) {
+    val ctx = LocalContext.current
+    val p = App.prefs
+    var text by remember(sid) { mutableStateOf(p.draft(sid)) }
+    var images by remember(sid) { mutableStateOf<List<Uri>>(emptyList()) }
+    var keep by remember(sid) { mutableStateOf(p.keepDefault) }
+    var attachMenu by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val pending by Nav.pendingDraft.collectAsState()
+    LaunchedEffect(pending) {
+        pending?.let { (s, t, imgs) -> if (s == sid) { text = if (text.isBlank()) t else "$text\n$t"; images = images + imgs; Nav.pendingDraft.value = null } }
+    }
+    LaunchedEffect(text) { delay(400); p.setDraft(sid, text) }
+
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(6)) { uris -> images = (images + uris).take(6) }
+    var cameraUri by remember { mutableStateOf<Uri?>(null) }
+    val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok -> if (ok) cameraUri?.let { images = images + it } }
+    val voice = rememberVoice(
+        onText = { heard -> text = if (text.isBlank()) heard else "$text $heard" },
+        onReplace = { old, new -> text = if (text.contains(old)) text.replaceFirst(old, new) else if (text.isBlank()) new else "$text $new" },
+    )
+
+    fun send() {
+        val t = text.trim()
+        if (t.isEmpty() && images.isEmpty()) return
+        Umbra.send(ctx, sid, t, images, keep)
+        text = ""; images = emptyList(); p.setDraft(sid, "")
+    }
+
+    Column(Modifier.fillMaxWidth().background(Spook.Crypt.copy(alpha = 0.92f)).navigationBarsPadding().padding(horizontal = 8.dp, vertical = 6.dp)) {
+        if (images.isNotEmpty()) Row(Modifier.horizontalScroll(rememberScrollState()).padding(bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            images.forEach { u ->
+                Box {
+                    AsyncImage(u, null, contentScale = ContentScale.Crop, modifier = Modifier.size(64.dp).clip(RoundedCornerShape(8.dp)))
+                    Box(Modifier.align(Alignment.TopEnd).size(20.dp).clip(CircleShape).background(Color(0xCC000000)).clickable { images = images - u },
+                        contentAlignment = Alignment.Center) { Text("✕", color = Color.White, fontSize = 11.sp) }
+                }
+            }
+        }
+        VoiceBar(voice)
+        Row(verticalAlignment = Alignment.Bottom) {
+            Row(Modifier.weight(1f).clip(RoundedCornerShape(24.dp)).background(Spook.Crypt2).padding(horizontal = 4.dp), verticalAlignment = Alignment.Bottom) {
+                Box {
+                    IconButton(onClick = { attachMenu = true }) { Icon(Icons.Default.AttachFile, "Attach", tint = Spook.Mist) }
+                    DropdownMenu(attachMenu, { attachMenu = false }, containerColor = Spook.Crypt2) {
+                        DropdownMenuItem(text = { Text("🖼 Photos", color = Spook.Bone) }, onClick = {
+                            attachMenu = false; pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        })
+                        DropdownMenuItem(text = { Text("📷 Camera", color = Spook.Bone) }, onClick = {
+                            attachMenu = false
+                            val f = File(ctx.cacheDir, "capture").apply { mkdirs() }.resolve("photo_${System.currentTimeMillis()}.jpg")
+                            val uri = FileProvider.getUriForFile(ctx, "com.maiconerick.xumbra.files", f)
+                            cameraUri = uri; camera.launch(uri)
+                        })
+                    }
+                }
+                androidx.compose.foundation.text.BasicTextField(
+                    value = text, onValueChange = { text = it },
+                    textStyle = TextStyle(color = Spook.Bone, fontSize = 16.sp),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(Spook.Pumpkin),
+                    maxLines = 7,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        capitalization = androidx.compose.ui.text.input.KeyboardCapitalization.Sentences,
+                        imeAction = if (p.enterSends) androidx.compose.ui.text.input.ImeAction.Send else androidx.compose.ui.text.input.ImeAction.Default),
+                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSend = { send() }),
+                    decorationBox = { inner ->
+                        Box(Modifier.padding(vertical = 13.dp)) {
+                            if (text.isEmpty()) Text(if (st.turn != null) "Queue a follow-up…" else "Message Umbra…", color = Spook.Fog, fontSize = 16.sp)
+                            inner()
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+                // remember / ghost toggle
+                st.settings?.takeIf { it.imageChat }?.let { ImageModelIcon(sid, it) }
+                ModelButton(sid, st)
+                Text(if (keep) "🧠" else "👻", fontSize = 18.sp, modifier = Modifier.clip(CircleShape).clickable { keep = !keep }.padding(10.dp))
+            }
+            Spacer(Modifier.width(6.dp))
+            val canSend = text.isNotBlank() || images.isNotEmpty()
+            val busy = st.turn != null
+            Box(Modifier.size(48.dp).clip(CircleShape).background(if (busy && !canSend) Brush.linearGradient(listOf(Spook.Blood, Spook.Blood)) else Spook.pumpkinBrush)
+                .clickable {
+                    when {
+                        canSend -> send()
+                        busy -> Umbra.cancel(sid)
+                        voice.recording -> voice.stop(scope)
+                        else -> voice.start()
+                    }
+                }, contentAlignment = Alignment.Center) {
+                Icon(when {
+                    canSend -> Icons.AutoMirrored.Filled.Send
+                    busy -> Icons.Default.Stop
+                    voice.recording -> Icons.Default.Stop
+                    else -> Icons.Default.Mic
+                }, null, tint = Color.Black)
+            }
+        }
+        if (!keep) Text("👻 Ghost mode: these messages aren't saved to Umbra's memory", color = Spook.Mist, fontSize = 11.sp, modifier = Modifier.padding(start = 12.dp, top = 3.dp))
+    }
+}
+
+// ───────────── voice → text (server transcribes) ─────────────
+
+private val engines = listOf("gemini" to "✨ Gemini", "openai" to "⚡ OpenAI")
+private fun engineName(p: String) = engines.firstOrNull { it.first == p }?.second ?: p
+
+/** Shown while recording (pick the engine), while transcribing, and after (who heard it + redo with the other). */
+@Composable
+private fun VoiceBar(v: VoiceState) {
+    val scope = rememberCoroutineScope()
+    val last = v.last
+    if (!v.recording && !v.busy && last == null) return
+    Row(Modifier.fillMaxWidth().padding(bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        when {
+            v.recording -> {
+                Dot(Spook.Blood, 10)
+                Spacer(Modifier.width(8.dp))
+                Text("${v.seconds}s", color = Spook.Bone, fontSize = 13.sp, modifier = Modifier.width(34.dp))
+                engines.forEach { (k, l) -> Pill(l, v.provider == k, small = true) { v.setEngine(k) }; Spacer(Modifier.width(6.dp)) }
+                Spacer(Modifier.weight(1f))
+                Text("cancel", color = Spook.Mist, fontSize = 12.sp, modifier = Modifier.clickable { v.cancel() }.padding(6.dp))
+            }
+            v.busy -> {
+                CircularProgressIndicator(Modifier.size(14.dp), color = Spook.Pumpkin, strokeWidth = 2.dp)
+                Spacer(Modifier.width(8.dp))
+                Text("${engineName(v.busyWith)} is transcribing… ${v.seconds}s", color = Spook.Bone, fontSize = 13.sp, modifier = Modifier.weight(1f))
+            }
+            last != null -> {
+                Text("🎤 " + engineName(last.provider) + (if (last.fallback) " (Gemini failed)" else ""), color = Spook.Mist, fontSize = 12.sp)
+                Spacer(Modifier.width(8.dp))
+                val other = if (last.provider == "gemini") "openai" else "gemini"
+                Pill("↻ try ${engineName(other)}", false, small = true) { v.redo(scope, other) }
+                Spacer(Modifier.weight(1f))
+                Text("✕", color = Spook.Mist, fontSize = 13.sp, modifier = Modifier.clickable { v.last = null }.padding(6.dp))
+            }
+        }
+    }
+}
+
+data class Heard(val text: String, val provider: String, val model: String, val fallback: Boolean)
+
+class VoiceState(
+    private val ctx: android.content.Context,
+    private val onText: (String) -> Unit,
+    private val onReplace: (String, String) -> Unit,
+    private val ask: () -> Unit,
+) {
+    var recording by mutableStateOf(false)
+    var busy by mutableStateOf(false)
+    var busyWith by mutableStateOf("")
+    var seconds by mutableIntStateOf(0)
+    var provider by mutableStateOf(App.prefs.transcribeProvider)
+    var last by mutableStateOf<Heard?>(null)
+    private var rec: MediaRecorder? = null
+    private var file: File? = null
+    private var started = 0L
+
+    fun setEngine(p: String) { provider = p; App.prefs.transcribeProvider = p }
+
+    fun start() {
+        if (ctx.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) { ask(); return }
+        val f = File(ctx.cacheDir, "voice.m4a")
+        try {
+            rec = MediaRecorder(ctx).apply {
+                setAudioSource(MediaRecorder.AudioSource.MIC)
+                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                setAudioSamplingRate(32000); setAudioEncodingBitRate(64000)
+                setOutputFile(f.absolutePath)
+                prepare(); start()
+            }
+            file = f; started = System.currentTimeMillis(); recording = true; last = null
+        } catch (e: Exception) { Umbra.banner.value = "Mic error: ${e.message}" }
+    }
+
+    fun tick() { if (recording || busy) seconds = ((System.currentTimeMillis() - started) / 1000).toInt() }
+
+    fun cancel() {
+        try { rec?.stop() } catch (_: Exception) { }
+        rec?.release(); rec = null; recording = false; seconds = 0
+    }
+
+    fun stop(scope: kotlinx.coroutines.CoroutineScope) {
+        try { rec?.stop() } catch (_: Exception) { }
+        rec?.release(); rec = null; recording = false
+        run(scope, provider, replacing = null)
+    }
+
+    /** Same recording, other engine; its text replaces what the first one wrote. */
+    fun redo(scope: kotlinx.coroutines.CoroutineScope, p: String) {
+        val prev = last ?: return
+        run(scope, p, replacing = prev.text)
+    }
+
+    private fun run(scope: kotlinx.coroutines.CoroutineScope, p: String, replacing: String?) {
+        val f = file ?: return
+        busy = true; busyWith = p; started = System.currentTimeMillis(); seconds = 0
+        scope.launch {
+            try {
+                val lang = App.prefs.transcribeLang
+                val extra = buildMap { put("provider", p); if (lang.isNotBlank()) put("language", lang) }
+                val o = Net.upload("/api/audio/transcribe", "voice.m4a", "audio/mp4", f.readBytes(), extra)
+                val heard = o.optString("text").trim()
+                if (heard.isNotEmpty()) {
+                    if (replacing != null) onReplace(replacing, heard) else onText(heard)
+                    last = Heard(heard, o.optString("provider", p), o.optString("model"), o.optBoolean("fallback"))
+                } else Umbra.banner.value = "Nothing was heard"
+            } catch (e: Exception) { Umbra.banner.value = "Transcription failed: ${e.message}" }
+            busy = false; seconds = 0
+        }
+    }
+}
+
+@Composable
+fun rememberVoice(onText: (String) -> Unit, onReplace: (String, String) -> Unit): VoiceState {
+    val ctx = LocalContext.current
+    val perm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    val v = remember { VoiceState(ctx, onText, onReplace) { perm.launch(Manifest.permission.RECORD_AUDIO) } }
+    LaunchedEffect(v.recording, v.busy) { while (v.recording || v.busy) { v.tick(); delay(250) } }
+    DisposableEffect(Unit) { onDispose { if (v.recording) v.cancel() } }
+    return v
+}
+
+// ───────────── long-press on a message ─────────────
+
+@Composable
+private fun MsgSheet(sid: String, m: Msg, isLastUser: Boolean, onClose: () -> Unit) {
+    val ctx = LocalContext.current
+    var select by remember { mutableStateOf(false) }
+    var info by remember { mutableStateOf(false) }
+    var askDelete by remember { mutableStateOf(false) }
+    if (askDelete) Confirm("Delete this message?", "It disappears from the chat and from what Umbra remembers of this conversation.", "Delete", danger = true,
+        onYes = { Umbra.deleteMessage(sid, m); askDelete = false; onClose() }, onNo = { askDelete = false })
+    if (select) Page("Select text", { select = false; onClose() }) {
+        SelectionContainer(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+            Text(m.text, color = Spook.Bone, fontSize = 16.sp, lineHeight = 22.sp)
+        }
+    }
+    if (info) AlertDialog(onDismissRequest = { info = false; onClose() }, containerColor = Spook.Crypt2,
+        title = { Text("Message info", color = Spook.Bone) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(Fmt.stamp(m.ts), color = Spook.Bone)
+                Text("id ${m.id}" + (m.source?.let { " · from $it" } ?: ""), color = Spook.Mist, fontSize = 12.sp)
+                m.turn?.let { t ->
+                    Text("${t.provider}/${t.model}", color = Spook.Pumpkin)
+                    Text("↑${t.inTok} ↓${t.outTok} tokens · ${Fmt.money(t.costUsd)} · ${Fmt.secs(t.durationSec)}", color = Spook.Bone, fontSize = 13.sp)
+                }
+                if (m.ephemeral) Text("👻 Not kept in Umbra's memory", color = Spook.Mist)
+            }
+        },
+        confirmButton = { TextButton(onClick = { info = false; onClose() }) { Text("OK", color = Spook.Pumpkin) } })
+    if (!select && !info && !askDelete) AlertDialog(onDismissRequest = onClose, containerColor = Spook.Crypt2,
+        text = {
+            Column {
+                @Composable fun item(label: String, color: Color = Spook.Bone, act: () -> Unit) =
+                    Text(label, color = color, fontSize = 16.sp, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable(onClick = act).padding(vertical = 11.dp, horizontal = 6.dp))
+                if (m.text.isNotBlank()) {
+                    item("📋 Copy") { copyText(ctx, m.text); Umbra.banner.value = "📋 Copied"; onClose() }
+                    item("✂ Select text") { select = true }
+                    item("↗ Share") { shareText(ctx, m.text); onClose() }
+                }
+                if (m.isUser && !m.pending) item("✏️ Edit & send again") {
+                    Nav.pendingDraft.value = Triple(sid, m.text, emptyList()); onClose()
+                }
+                if ((m.isUser && isLastUser) || m.isError) item("↻ Answer again") { Umbra.retry(sid); onClose() }
+                item("ℹ Info") { info = true }
+                if (!m.pending) item("🗑 Delete", Spook.Blood) { askDelete = true }
+            }
+        },
+        confirmButton = {})
+}
+
+// image viewer: see ImageView.kt (pixel-perfect, share / edit / crop / pixel-art fix)

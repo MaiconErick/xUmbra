@@ -1,0 +1,14 @@
+-keep class com.maiconerick.xumbra.** { *; }
+# sshj + BouncyCastle are loaded reflectively
+-keep class net.schmizz.** { *; }
+-keep class com.hierynomus.** { *; }
+-keep class org.bouncycastle.** { *; }
+-dontwarn org.bouncycastle.**
+-dontwarn net.schmizz.**
+-dontwarn com.hierynomus.**
+-dontwarn org.slf4j.**
+-dontwarn javax.naming.**
+-dontwarn sun.security.**
+-dontwarn com.jcraft.**
+-dontwarn org.ietf.jgss.**
+-dontwarn java.lang.management.**
